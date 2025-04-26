@@ -25,16 +25,16 @@ from sklearn.metrics import confusion_matrix, classification_report
 from tabulate import tabulate
 
 #Global Variables
-TRIAL_NAME = "CNN_best_model"
+TRIAL_NAME = "CNN_best_model_HW3"
 DATA_DIR = "Project_Data_Final"
 IMG_SIZE = (64, 64)
 BATCH_SIZE = 64
 EPOCHS = 150
 
 # Toggle options for different techniques
-USE_DATA_AUGMENTATION = 0
+USE_DATA_AUGMENTATION = 1
 DROP_RATE = 0.4
-USE_BATCH_NORM = 0
+USE_BATCH_NORM = 1
 USE_INCEPTION = 0
 USE_RESIDUAL = 0
 
@@ -58,10 +58,6 @@ def augment_image(image, label): # Augment files - MOVE TO WITHIN FUNCTION AFTER
     if tf.random.uniform(()) > 0.5:
         num_rotations = tf.random.uniform(shape=[], minval=1, maxval=4, dtype=tf.int32)
         image = tf.image.rot90(image, k=num_rotations)  # Rotate 90/180/270 degrees
-
-    if tf.random.uniform(()) > 0.5:
-        image = tf.stack([image[..., 2], image[..., 1], image[..., 0]], axis=-1)
-        # Swap red and blue colors
 
     return image, label
 
@@ -160,7 +156,7 @@ def load_data():
     train_ds = train_ds.map(process_path, num_parallel_calls=tf.data.AUTOTUNE)
 
     if USE_DATA_AUGMENTATION:
-        train_ds = augment_and_visualize_dataset(train_ds)  # Augment preprocessed images
+        train_ds = augment_dataset(train_ds)  # Augment preprocessed images
 
     train_ds = train_ds.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
     train_ds = train_ds.cache()
