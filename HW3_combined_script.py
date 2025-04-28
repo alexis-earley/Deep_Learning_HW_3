@@ -29,9 +29,9 @@ class DQNAgent:
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = 0.99
-        self.epsilon = 1.0
+        self.epsilon = 0.5
         self.epsilon_min = 0.05
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.95
         self.learning_rate = 0.001
         self.batch_size = 32
         self.memory = deque(maxlen=50000)
@@ -58,26 +58,37 @@ class DQNAgent:
         return np.argmax(q_values[0])
 
     def replay(self):
+        # If not enough samples, sample 1; else sample a full batch
         if len(self.memory) < self.batch_size:
-            return
-        minibatch = random.sample(self.memory, self.batch_size)
-        states = np.zeros((self.batch_size, self.state_size))
-        targets = np.zeros((self.batch_size, self.action_size))
+            minibatch = random.sample(self.memory, 1)
+            current_batch_size = 1
+        else:
+            minibatch = random.sample(self.memory, self.batch_size)
+            current_batch_size = self.batch_size
+
+        states = np.zeros((current_batch_size, self.state_size))
+        targets = np.zeros((current_batch_size, self.action_size))
+        td_errors = []
 
         for i, (state, action, reward, next_state, done) in enumerate(minibatch):
             states[i] = state
             target = self.model.predict(np.expand_dims(state, axis=0), verbose=0)[0]
+            
             if done:
+                td_error = reward - target[action]
                 target[action] = reward
             else:
                 next_q = np.amax(self.model.predict(np.expand_dims(next_state, axis=0), verbose=0)[0])
-                target[action] = reward + self.gamma * next_q
+                td_target = reward + self.gamma * next_q
+                td_error = td_target - target[action]
+                target[action] = td_target
+
+            td_errors.append(abs(td_error))  # store absolute TD error
             targets[i] = target
 
         self.model.fit(states, targets, epochs=1, verbose=0)
 
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        return np.mean(td_errors)
 
     def save(self, path):
         self.model.save(path)
@@ -280,14 +291,19 @@ def capture_image(env, vision_sensor):
 
 def main():
     # ======== SETUP ========
-    # 1. Load the trained CNN model
+    # Load the trained CNN model
     global cnn_model
     cnn_model = tf.keras.models.load_model('/Users/alexis/Desktop/Deep_Learning/HW_3/my_model_CNN_best_model_HW3.keras', compile=False)
-    #cnn_model = tf.keras.models.load_model('/Users/alexis/Desktop/Deep_Learning/HW_3/my_model_CNN_best_model_HW3.keras')
 
-    # 2. Initialize DQN Agent
+    # Initialize DQN Agent
     agent = DQNAgent(state_size=1, action_size=24)
     action_mappings = generate_action_mappings()
+
+    # Clear the training log at the start
+    log_file_path = "/Users/alexis/Desktop/Deep_Learning/HW_3/training_log.txt"
+    log_file = open(log_file_path, "w")
+    log_file.write("")  # Overwrite/clear
+    log_file.close()
 
     # ======== TRAINING LOOP ========
     episodes = 100
@@ -295,67 +311,83 @@ def main():
 
     for episode in range(episodes):
         print(f"\n=== Starting Episode {episode + 1}/{episodes} ===")
+        
+        # Append to log file
+        log_file = open(log_file_path, "a")
+        log_file.write(f"\n=== Starting Episode {episode + 1}/{episodes} ===\n")
 
-        # Start CoppeliaSim simulation
         env = Simulation()
         vision_sensor = env.sim.getObject("/Box/visionSensor")
-        
-        # Initial Image Capture
+
         img = capture_image(env, vision_sensor)
-        #save_image(img, episode, 0)
         previous_prob = predict_from_image(img)
 
         step = 0
         done = False
+        total_reward = 0
 
         while not done and step < steps_per_episode:
             # 1. Select action
             action_index = agent.act(np.array([previous_prob]))
             directions = action_mappings[action_index]
 
-            # 2. Execute 4 moves automatically
-            shakes = 4 #4
-            span = 0.003 #0.0026
+            # 2. Execute movement
+            shakes = 4
+            span = 0.003
             for direction in directions:
                 env.action(shakes=shakes, span=span, direction=direction)
 
-            # 3. Capture New Image after movement
+            # 3. Capture New Image
             img = capture_image(env, vision_sensor)
-            #save_image(img, episode, step + 1)
 
-            # 4. Predict new mixing probability
+            # 4. Predict new probability
             current_prob = predict_from_image(img)
 
             # 5. Calculate reward
-            improvement = current_prob - previous_prob
-            if current_prob > 0.9 and previous_prob > 0.9:
-                reward = 200
+            if current_prob > 0.8 and previous_prob > 0.8:
+                reward = 500
                 done = True
-            elif improvement > 0:
-                reward = improvement * 100  # Larger reward for larger improvement
+            elif current_prob > 0.8:
+                reward = 0
             else:
-                reward = -0.1 - (step * 0.004)
+                reward = -5  # fixed penalty
 
-            print(f"Step {step}: Predicted Mixing: {current_prob:.3f}, Reward: {reward:.2f}")
-
-            # 6. Store and Learn
+            # 6. Store experience and learn
             agent.remember(np.array([previous_prob]), action_index, reward, np.array([current_prob]), done)
-            agent.replay()
+            td_error = agent.replay()
 
+            # 7. Print and Log per step
+            if td_error is not None:
+                step_message = f"Step {step}: Predicted Mixing: {current_prob:.3f}, Reward: {reward:.2f}, TD Error: {td_error:.4f}"
+            else:
+                step_message = f"Step {step}: Predicted Mixing: {current_prob:.3f}, Reward: {reward:.2f}"
+
+            print(step_message)
+            log_file.write(step_message + "\n")
+
+            # Update
+            total_reward += reward
             previous_prob = current_prob
             step += 1
 
-        print(f"=== Episode {episode + 1} complete! ===")
+        # Decay epsilon after each episode
+        if agent.epsilon > agent.epsilon_min:
+            agent.epsilon *= agent.epsilon_decay
+
+        # End of episode
+        episode_summary = f"=== Episode {episode + 1} complete! ===\nAccumulated Reward: {total_reward}\nCurrent epsilon: {agent.epsilon:.4f}\n"
+        print(episode_summary)
+        log_file.write(episode_summary + "\n")
+
+        # Cleanup
         env.stopSim()
-        
         while env.sim.getSimulationState() != env.sim.simulation_stopped:
             pass
 
+        log_file.close()
+
     # ======== FINISH ========
     agent.save('/Users/alexis/Desktop/Deep_Learning/HW_3/dqn_agent_trained.keras')
-    #agent.save('/content/drive/MyDrive/Deep_Learning_HW_3/dqn_agent_trained.keras')
-    #env.stopSim()
-
     print("Training Finished!")
 
 if __name__ == '__main__':
